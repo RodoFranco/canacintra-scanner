@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>CANACINTRA | Control de Acceso QR</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#eef2f6;color:#1f2937;font-family:Arial,sans-serif}
+.wrap{max-width:520px;margin:auto;padding:16px}
+.card{background:#fff;border-radius:18px;padding:18px;margin-bottom:14px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
+h1{font-size:23px;text-align:center;margin:0;color:#075ca8}
+.sub{text-align:center;color:#666;margin-top:5px;font-size:14px}
+.label{font-weight:700;font-size:14px;display:block;margin-bottom:7px}
+select,button,input{width:100%;padding:14px;border-radius:11px;font-size:16px}
+select,input{border:1px solid #ccc;background:#fff}
+button{border:0;font-weight:700;cursor:pointer}
+.start{background:#075ca8;color:#fff}
+.stop{background:#555;color:#fff}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.scanner{background:#000;border-radius:16px;overflow:hidden;min-height:280px}
+#reader{width:100%}
+#reader video{width:100%!important;height:auto!important}
+.line{position:absolute;left:12%;right:12%;top:50%;height:3px;background:#fff;z-index:3;opacity:.8}
+.status{text-align:center;color:#666;font-size:13px;margin-top:8px}
+.loading{display:none;text-align:center;background:#e0f2fe;color:#075985;border-radius:12px;padding:13px;margin-top:12px;font-weight:700}
+.result{display:none;text-align:center;border-radius:16px;padding:20px;margin-top:14px}
+.ok{background:#dcfce7;border:2px solid #22c55e;color:#166534}
+.bad{background:#fee2e2;border:2px solid #ef4444;color:#991b1b}
+.warn{background:#fef3c7;border:2px solid #f59e0b;color:#92400e}
+.icon{font-size:48px}
+.msg{font-size:22px;font-weight:800;margin:7px 0 12px}
+.person{font-size:17px;line-height:1.5}
+.small{font-size:13px;margin-top:10px}
+.help{text-align:center;color:#666;font-size:12px;margin:15px 5px;line-height:1.45}
+.setup{display:none}
+.setup.show{display:block}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+<h1>CANACINTRA TORREÓN</h1>
+<div class="sub">CONTROL DE ACCESO QR</div>
+</div>
+
+<div class="card setup" id="setupCard">
+<label class="label">URL del Web App de Apps Script</label>
+<input id="scriptUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+<div style="font-size:12px;color:#666;margin-top:8px">
+Se guarda únicamente en este teléfono. Debe terminar en <b>/exec</b>.
+</div>
+<button style="margin-top:10px;background:#075ca8;color:#fff" onclick="guardarConfiguracion()">GUARDAR CONFIGURACIÓN</button>
+</div>
+
+<div class="card">
+<label class="label" for="puerta">Puerta de acceso</label>
+<select id="puerta">
+<option value="1">PUERTA 1</option>
+<option value="2">PUERTA 2</option>
+<option value="3">PUERTA 3</option>
+</select>
+</div>
+
+<div class="scanner" style="position:relative">
+<div id="reader"></div>
+<div class="line"></div>
+</div>
+
+<div class="buttons">
+<button id="start" class="start" onclick="iniciar()">INICIAR CÁMARA</button>
+<button id="stop" class="stop" onclick="detener()" disabled>DETENER</button>
+</div>
+
+<div id="camStatus" class="status">Cámara detenida</div>
+<div id="loading" class="loading">VALIDANDO QR...</div>
+
+<div id="result" class="result">
+<div id="icon" class="icon"></div>
+<div id="msg" class="msg"></div>
+<div id="person" class="person"></div>
+<div id="small" class="small"></div>
+</div>
+
+<div class="help">
+El QR se valida directamente contra el sistema de CANACINTRA y el resultado queda registrado en Google Sheets.
+</div>
+
+</div>
+
+<script>
+let qr=null, activo=false, procesando=false, cameras=[];
+
+const $ = id => document.getElementById(id);
+
+window.addEventListener('load',()=>{
+  const url=localStorage.getItem('canacintra_script_url')||'';
+  $('scriptUrl').value=url;
+  if(!url) $('setupCard').classList.add('show');
+});
+
+function getScriptUrl(){
+  return ($('scriptUrl').value||localStorage.getItem('canacintra_script_url')||'').trim().replace(/\/+$/,'');
+}
+
+function guardarConfiguracion(){
+  const url=$('scriptUrl').value.trim().replace(/\/+$/,'');
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/i.test(url)){
+    alert('La URL no parece una URL válida de Web App de Google Apps Script. Debe comenzar con https://script.google.com/macros/s/ y terminar en /exec.');
+    return;
+  }
+  localStorage.setItem('canacintra_script_url',url);
+  $('setupCard').classList.remove('show');
+  $('camStatus').textContent='Configuración guardada. Lista para iniciar.';
+}
+
+async function iniciar(){
+  if(activo) return;
+  ocultar();
+
+  const scriptUrl=getScriptUrl();
+  if(!scriptUrl){
+    $('setupCard').classList.add('show');
+    error('Primero configure la URL del Web App de Apps Script.');
+    return;
+  }
+
+  if(!window.isSecureContext){
+    error('Esta página no está en un contexto HTTPS seguro. Abra el escáner desde una URL HTTPS.');
+    return;
+  }
+
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    error('Este navegador no permite acceso a la cámara. Use Chrome en Android o Safari/Chrome en iPhone actualizado.');
+    return;
+  }
+
+  $('camStatus').textContent='Solicitando permiso de cámara...';
+
+  try{
+    cameras=await Html5Qrcode.getCameras();
+
+    if(!cameras || !cameras.length){
+      throw new Error('No se encontró ninguna cámara disponible.');
+    }
+
+    let cameraId=cameras[0].id;
+    const back=cameras.find(c=>/back|rear|environment|trasera|posterior/i.test(c.label||''));
+    if(back) cameraId=back.id;
+
+    qr=new Html5Qrcode('reader');
+
+    await qr.start(
+      cameraId,
+      {
+        fps:10,
+        qrbox:(w,h)=>{
+          const s=Math.floor(Math.min(w,h)*0.72);
+          return {width:s,height:s};
+        },
+        aspectRatio:1
+      },
+      escaneo,
+      ()=>{}
+    );
+
+    activo=true;
+    $('start').disabled=true;
+    $('stop').disabled=false;
+    $('camStatus').textContent='Cámara activa - esperando QR...';
+
+  }catch(e){
+    console.error('ERROR DE CÁMARA:',e);
+    activo=false;
+    $('start').disabled=false;
+    $('stop').disabled=true;
+
+    let detalle='No se pudo iniciar la cámara.';
+    if(e && e.name==='NotAllowedError'){
+      detalle='Permiso de cámara rechazado. En el navegador, permita la cámara para este sitio y vuelva a intentarlo.';
+    }else if(e && e.name==='NotFoundError'){
+      detalle='No se encontró una cámara disponible en este teléfono.';
+    }else if(e && e.name==='NotReadableError'){
+      detalle='La cámara está siendo utilizada por otra aplicación. Cierre otras aplicaciones que estén usando la cámara.';
+    }else if(e && e.name==='SecurityError'){
+      detalle='El navegador bloqueó el acceso por seguridad. Verifique que la página esté abierta con HTTPS.';
+    }else if(e && e.message){
+      detalle+= ' '+e.message;
+    }
+
+    $('camStatus').textContent='Error de cámara';
+    error(detalle);
+  }
+}
+
+async function detener(){
+  if(!qr) return;
+  try{
+    if(activo) await qr.stop();
+    qr.clear();
+  }catch(e){console.error(e)}
+  qr=null;
+  activo=false;
+  procesando=false;
+  $('start').disabled=false;
+  $('stop').disabled=true;
+  $('camStatus').textContent='Cámara detenida';
+}
+
+function escaneo(texto){
+  if(procesando || !texto) return;
+  procesando=true;
+  $('loading').style.display='block';
+  $('camStatus').textContent='QR detectado - validando...';
+  try{qr.pause(true)}catch(e){}
+  const puerta=$('puerta').value;
+  validarConAppsScript(String(texto).trim(),puerta);
+}
+
+/*
+  Se usa JSONP para que el escáner pueda estar alojado fuera de Apps Script
+  sin depender de CORS/fetch.
+*/
+function validarConAppsScript(token,puerta){
+  const base=getScriptUrl();
+  if(!base){
+    error('No está configurada la URL del sistema.');
+    return reanudar();
+  }
+
+  const callback='canacintraCallback_'+Date.now()+'_'+Math.floor(Math.random()*10000);
+  const script=document.createElement('script');
+
+  window[callback]=function(respuesta){
+    try{ document.head.removeChild(script); }catch(e){}
+    try{ delete window[callback]; }catch(e){}
+    respuesta(respuesta);
+  };
+
+  script.onerror=function(){
+    try{ document.head.removeChild(script); }catch(e){}
+    try{ delete window[callback]; }catch(e){}
+    error('No fue posible comunicarse con el sistema de Google Apps Script.');
+    setTimeout(reanudar,3000);
+  };
+
+  script.src=base+
+    '?api=validarQR'+
+    '&token='+encodeURIComponent(token)+
+    '&puerta='+encodeURIComponent(puerta)+
+    '&callback='+encodeURIComponent(callback)+
+    '&t='+Date.now();
+
+  document.head.appendChild(script);
+}
+
+/* Corrige el pequeño envoltorio de JSONP y procesa la respuesta */
+function respuestaServidor(r){
+  $('loading').style.display='none';
+  if(!r){
+    error('El servidor no devolvió respuesta.');
+    return setTimeout(reanudar,3000);
+  }
+
+  if(r.ok===true && r.resultado==='AUTORIZADO'){
+    return exito(r);
+  }
+
+  if(r.resultado==='YA_UTILIZADO'){
+    return advertencia(r);
+  }
+
+  error(r.mensaje||'Acceso denegado.');
+  setTimeout(reanudar,3000);
+}
+
+function exito(r){
+  $('result').className='result ok';
+  $('icon').textContent='✓';
+  $('msg').textContent='ACCESO AUTORIZADO';
+  $('person').innerHTML='<strong>'+esc(r.nombre)+'</strong>'+(r.empresa?'<br>'+esc(r.empresa):'');
+  $('small').textContent='Puerta '+esc(r.puerta||'');
+  $('result').style.display='block';
+  setTimeout(()=>{ocultar();reanudar()},3000);
+}
+
+function advertencia(r){
+  $('result').className='result warn';
+  $('icon').textContent='⚠';
+  $('msg').textContent='QR YA UTILIZADO';
+  $('person').innerHTML='<strong>'+esc(r.nombre||'')+'</strong>'+(r.empresa?'<br>'+esc(r.empresa):'');
+  $('small').textContent=r.mensaje||'Este código QR ya fue utilizado.';
+  $('result').style.display='block';
+  setTimeout(()=>{ocultar();reanudar()},3000);
+}
+
+function error(t){
+  $('result').className='result bad';
+  $('icon').textContent='✕';
+  $('msg').textContent='ACCESO DENEGADO';
+  $('person').textContent=t;
+  $('small').textContent='';
+  $('result').style.display='block';
+}
+
+function reanudar(){
+  procesando=false;
+  $('loading').style.display='none';
+  if(qr&&activo){
+    try{
+      qr.resume();
+      $('camStatus').textContent='Cámara activa - esperando QR...';
+    }catch(e){console.error(e)}
+  }
+}
+
+function ocultar(){ $('result').style.display='none'; }
+
+function esc(t){
+  return String(t||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#039;');
+}
+
+/* El callback JSONP real llama a esta función */
+function instalarCallback(callback){
+  window[callback]=respuestaServidor;
+}
+</script>
+
+<script>
+/*
+  Adaptador JSONP:
+  El servidor devuelve algo como:
+  canacintraCallback_123({...});
+  Por eso sobrescribimos el callback generado para que procese la respuesta.
+*/
+const validarOriginal=validarConAppsScript;
+validarConAppsScript=function(token,puerta){
+  const base=getScriptUrl();
+  if(!base){error('No está configurada la URL del sistema.');return reanudar();}
+
+  const callback='canacintraCallback_'+Date.now()+'_'+Math.floor(Math.random()*10000);
+  const script=document.createElement('script');
+
+  window[callback]=function(r){
+    try{script.remove()}catch(e){}
+    try{delete window[callback]}catch(e){}
+    respuestaServidor(r);
+  };
+
+  script.onerror=function(){
+    try{script.remove()}catch(e){}
+    try{delete window[callback]}catch(e){}
+    error('No fue posible comunicarse con el sistema de Google Apps Script.');
+    setTimeout(reanudar,3000);
+  };
+
+  script.src=base+
+    '?api=validarQR&token='+encodeURIComponent(token)+
+    '&puerta='+encodeURIComponent(puerta)+
+    '&callback='+encodeURIComponent(callback)+
+    '&t='+Date.now();
+
+  document.head.appendChild(script);
+};
+</script>
+
+</body>
+</html>
